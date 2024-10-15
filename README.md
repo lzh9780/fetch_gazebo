@@ -1,5 +1,7 @@
 # Usage of fetch_gazebo
 
+Based on https://github.com/ZebraDevs/fetch_gazebo/tree/gazebo11
+
 ## 1. Requests
 `sudo apt-get install ros-noetic-fetch-moveit-config`
 
