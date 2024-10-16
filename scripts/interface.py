@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 
+import argparse
 import rospy
 from threading import Thread, Event
 from gazebo_msgs.msg import LinkState, ModelState
@@ -17,7 +18,7 @@ from scipy.spatial.transform import Rotation
 import actionlib
 
 class SimpleGraspInterface:
-    def __init__(self, node_name: str,):
+    def __init__(self, node_name: str, use_ik=True):
         self.node_name = node_name
         rospy.init_node(self.node_name)
         
@@ -31,7 +32,7 @@ class SimpleGraspInterface:
         self.arm_client.wait_for_server()
         rospy.loginfo("...connected.")
         
-        self.move_group = MoveGroupInterface("arm_with_torso", "base_link")
+        # self.move_group = MoveGroupInterface("arm_with_torso", "base_link")
         
         # self.planning_scene = PlanningSceneInterface("base_link")
         # # self.planning_scene.removeCollisionObject("my_front_ground")
@@ -45,37 +46,40 @@ class SimpleGraspInterface:
         
         self.arm_joint_names = ["shoulder_pan_joint", "shoulder_lift_joint", "upperarm_roll_joint",
               "elbow_flex_joint", "forearm_roll_joint", "wrist_flex_joint", "wrist_roll_joint"]
+        self.head_joint_names = ["head_pan_joint", "head_tilt_joint"]
         
         self._moveit_ik_service = rospy.ServiceProxy('/compute_ik', GetPositionIK)
         self.ik_event = Event()
         
         self.ik_target = PoseStamped()
         
-        self.arm_sub = rospy.Subscriber("/fetch/pose_cmd", PoseStamped, self.arm_ik_callback, queue_size=10)
-        self.ik_target = None
-        def compute_ik():
-            while not rospy.is_shutdown():
-                self.ik_event.wait()
-                joint_target = self._compute_inverse_kinematics(self.ik_target)
-                if joint_target is not None:
-                    self.arm_joint_pos_target = joint_target
-                    trajectory = JointTrajectory()
-                    trajectory.joint_names = self.arm_joint_names
-                    trajectory.points.append(JointTrajectoryPoint())
-                    trajectory.points[0].positions = joint_target
-                    trajectory.points[0].velocities =  [0.0] * len(joint_target)
-                    trajectory.points[0].accelerations = [0.0] * len(joint_target)
-                    trajectory.points[0].time_from_start = rospy.Duration(4.0)
-                    
-                    arm_goal = FollowJointTrajectoryGoal()
-                    arm_goal.trajectory = trajectory
-                    arm_goal.goal_time_tolerance = rospy.Duration(0.0)
-                    
-                    self.arm_client.send_goal(arm_goal)
-                    
-                self.ik_event.clear()
+        print(use_ik)
+        if use_ik:
+            self.arm_sub = rospy.Subscriber("/fetch/pose_cmd", PoseStamped, self.arm_ik_callback, queue_size=10)
+            self.ik_target = None
+            def compute_ik():
+                while not rospy.is_shutdown():
+                    self.ik_event.wait()
+                    joint_target = self._compute_inverse_kinematics(self.ik_target)
+                    if joint_target is not None:
+                        self.arm_joint_pos_target = joint_target
+                        trajectory = JointTrajectory()
+                        trajectory.joint_names = self.arm_joint_names
+                        trajectory.points.append(JointTrajectoryPoint())
+                        trajectory.points[0].positions = joint_target
+                        trajectory.points[0].velocities =  [0.0] * len(joint_target)
+                        trajectory.points[0].accelerations = [0.0] * len(joint_target)
+                        trajectory.points[0].time_from_start = rospy.Duration(4.0)
+                        
+                        arm_goal = FollowJointTrajectoryGoal()
+                        arm_goal.trajectory = trajectory
+                        arm_goal.goal_time_tolerance = rospy.Duration(0.0)
+                        
+                        self.arm_client.send_goal(arm_goal)
+                        
+                    self.ik_event.clear()
 
-        Thread(target=compute_ik, daemon=True).start()
+            Thread(target=compute_ik, daemon=True).start()
 
         # This is the wrist link not the gripper itself
         self.gripper_frame = 'gripper_link'
@@ -105,6 +109,10 @@ class SimpleGraspInterface:
         
         self.gripper_pub = rospy.Publisher(
             "/gripper_controller/gripper_action/goal", GripperCommandActionGoal, queue_size=self.pub_queue_size
+        )
+        
+        self.head_sub = rospy.Subscriber(
+            "/fetch/camera_orientation", Point, self.head_callback, queue_size=self.sub_queue_size
         )
         
     def _get_joint_states_by_names(self, joint_names:tuple,all_joint_names:tuple,all_joint_values:tuple) -> list:
@@ -188,6 +196,22 @@ class SimpleGraspInterface:
         cmd_msg.goal.command.position = 0.1 * cmd
         self.gripper_pub.publish(cmd_msg)
     
+    def head_callback(self, cmd_msg:Point):
+        x, y, z = cmd_msg.x, cmd_msg.y, cmd_msg.z
+        trajectory = JointTrajectory()
+        trajectory.joint_names = self.head_joint_names
+        trajectory.points.append(JointTrajectoryPoint())
+        trajectory.points[0].positions = [z, -x]
+        trajectory.points[0].velocities = [0.0] * len(self.head_joint_names)
+        trajectory.points[0].accelerations = [0.0] * len(self.head_joint_names)
+        trajectory.points[0].time_from_start = rospy.Duration(5.0)
+
+        head_goal = FollowJointTrajectoryGoal()
+        head_goal.trajectory = trajectory
+        head_goal.goal_time_tolerance = rospy.Duration(0.0)
+        
+        self.head_client.send_goal(head_goal)
+    
     def reset_callback(self, cmd_msg:Bool):
         if cmd_msg.data:
             pass
@@ -221,6 +245,11 @@ class SimpleGraspInterface:
     
 
 def main():
+    # parser = argparse.ArgumentParser()
+    # parser.add_argument('--ik', action='store_true')
+    # args, unknown = parser.parse_known_args()
+
+    # g = SimpleGraspInterface("simple_grasp", use_ik=args.ik)
     g = SimpleGraspInterface("simple_grasp")
     g.run()
 
