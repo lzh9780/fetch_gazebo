@@ -16,11 +16,16 @@ import time
 import numpy as np
 from scipy.spatial.transform import Rotation
 import actionlib
+import tf2_ros
 
 class SimpleGraspInterface:
     def __init__(self, node_name: str, use_ik=True):
         self.node_name = node_name
         rospy.init_node(self.node_name)
+        
+        # Create a buffer and listener
+        self.tfBuffer = tf2_ros.Buffer()
+        self.listener = tf2_ros.TransformListener(self.tfBuffer)
         
         rospy.loginfo("Waiting for head_controller...")
         self.head_client = actionlib.SimpleActionClient("head_controller/follow_joint_trajectory", FollowJointTrajectoryAction)
@@ -216,6 +221,15 @@ class SimpleGraspInterface:
         if cmd_msg.data:
             pass
     
+    def tf_cal(self):
+        # Wait for the transform to be available
+        try:
+            trans = self.tfBuffer.lookup_transform('base_link', 'head_camera_link', rospy.Time.now(), rospy.Duration(1.0))
+            print(trans)
+            # trans.transform contains the transformation matrix
+        except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException):
+            rospy.logerr("Transform not available")
+    
     def run(self):
         """
         step 1: move arm to the target
@@ -241,7 +255,9 @@ class SimpleGraspInterface:
         #         self.arm_movement(self.target_pose)
         #     print(step)
         #     continue
-        rospy.spin()
+        # rospy.spin()
+        while not rospy.is_shutdown():
+            self.tf_cal()
     
 
 def main():
