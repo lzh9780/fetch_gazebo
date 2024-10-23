@@ -1,45 +1,19 @@
 #!/usr/bin/env python
 
-# from airbot.backend import Arm, Camera, Base, Gripper
-import os
-import numpy as np
-import copy
 import rospy
-# from airbot.backend.utils.utils import camera2base, armbase2world
-# from airbot.lm import Detector, Segmentor
-# from airbot.grasp.graspmodel import GraspPredictor
-from PIL import Image
-import time
+from std_msgs.msg import Bool
+from sensor_msgs.msg import Image, CameraInfo, JointState
+from geometry_msgs.msg import PoseStamped, Point
+from control_msgs.msg import GripperCommandActionGoal
+from cv_bridge import CvBridge
 import cv2
-# from airbot.example.utils.draw import draw_bbox, obb2poly
-# from airbot.example.utils.vis_depth import vis_image_and_depth
-from scipy.spatial.transform import Rotation
-from threading import Thread, Lock
-
-def depth2cloud(depth_im, intrinsic_mat, organized=True):
-    """ Generate point cloud using depth image only.
-        Input:
-            depth: [numpy.ndarray, (H,W), numpy.float32]
-                depth image
-            camera_info: dict
-
-        Output:
-            cloud: [numpy.ndarray, (H,W,3)/(H*W,3), numpy.float32]
-                generated cloud, (H,W,3) for organized=True, (H*W,3) for organized=False
-    """
-    height, width = depth_im.shape
-    fx, fy, cx, cy = intrinsic_mat[0][0], intrinsic_mat[1][1], intrinsic_mat[0][2], intrinsic_mat[1][2]
-    assert (depth_im.shape[0] == height and depth_im.shape[1] == width)
-    xmap = np.arange(width)
-    ymap = np.arange(height)
-    xmap, ymap = np.meshgrid(xmap, ymap)
-    points_z = depth_im  # change the unit to metel
-    points_x = (xmap - cx) * points_z / fx
-    points_y = (ymap - cy) * points_z / fy
-    cloud = np.stack([points_x, points_y, points_z], axis=-1)
-    if not organized:
-        cloud = cloud.reshape([-1, 3])
-    return cloud
+import numpy as np
+import matplotlib.pyplot as plt
+import pandas as pd
+import time
+import torch
+import tf2_ros
+from scipy.spatial.transform import Rotation as R
 
 class Camera():
     def __init__(self):
@@ -48,67 +22,225 @@ class Camera():
         
         self.depth_image = Image()
         self.depth_sub = rospy.Subscriber("/head_camera/depth_registered/image_raw", Image, self.depth_callback, queue_size=10)
-    
+        
+        self.camera_info = CameraInfo()
+        self.info_sub = rospy.Subscriber("/head_camera/rgb/camera_info", CameraInfo, self.info_callback, queue_size=10)
+            
     def rgb_callback(self, cmd_msg):
         self.rgb_image = cmd_msg
     
     def get_rgb(self):
-        return self.rgb_image
+        bridge = CvBridge()
+        cv_image = bridge.imgmsg_to_cv2(self.rgb_image, desired_encoding='rgb8')
+        return cv_image
     
     def depth_callback(self, cmd_msg):
         self.depth_image = cmd_msg
     
     def get_depth(self):
-        return self.depth_image
-
-class Solution:
-    def __init__(self):
-        self.image_lock = Lock()
-        self.result_lock = Lock()
-        self.prompt_lock = Lock()
+        bridge = CvBridge()
+        cv_image = bridge.imgmsg_to_cv2(self.depth_image, desired_encoding='32FC1')
+        return cv_image
+    
+    def info_callback(self, cmd_msg):
+        self.camera_info = cmd_msg
         
+    def get_camera_info(self):
+        return self.camera_info
+
+class Detector:
+    def __init__(self):
         self.camera = Camera()
+        self.model = self.load_model()
+        self.classes = self.model.names
+        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        
+        self.img_pub = rospy.Publisher("/detect/image", Image, queue_size=10)
+        
+        self.tfBuffer = tf2_ros.Buffer()
+        self.listener = tf2_ros.TransformListener(self.tfBuffer)
+        
+        self.arm_pub = rospy.Publisher("/fetch/pose_cmd", PoseStamped, queue_size=10)
+        self.gripper_pub = rospy.Publisher(
+            "/fetch/gripper_cmd", Bool, queue_size=10
+        )
+        self.joint_pub = rospy.Publisher("/fetch/joint_cmd", JointState, queue_size=10)
+        self.head_pub = rospy.Publisher("/fetch/camera_orientation", Point, queue_size=10)
     
-    def update_once(self):
-        with self.image_lock, self.result_lock:
-            self._image = copy.deepcopy(self.camera.get_rgb())
-            self._depth = copy.deepcopy(self.camera.get_depth())
-            self._det_result = self.detector.infer(self._image, self._prompt)
-            self._bbox = self._det_result['bbox'].numpy().astype(int)
-            self._sam_result = self.segmentor.infer(self._image, self._bbox[None, :2][:, [1, 0]])
-            self._mask = self._sam_result['mask']
+    def load_model(self):
+        """
+        Loads Yolo5 model from pytorch hub.
+        :return: Trained Pytorch model.
+        """
+        model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=True)
+        return model
 
-    @staticmethod
-    def base_cloud(image, depth, intrinsic, shift):
-        cam_cloud = depth2cloud(depth, intrinsic)
-        cam_cloud = np.copy(np.concatenate((cam_cloud, image), axis=2))
-        return camera2base(cam_cloud, shift)
+    def score_frame(self, frame):
+        """
+        Takes a single frame as input, and scores the frame using yolo5 model.
+        :param frame: input frame in numpy/list/tuple format.
+        :return: Labels and Coordinates of objects detected by model in the frame.
+        """
+        self.model.to(self.device)
+        frame = [frame]
+        results = self.model(frame)
+        labels = results.xyxyn[0][:, -1].cpu().numpy()
+        cord = results.xyxyn[0][:, :-1].cpu().numpy()
+        return labels, cord
 
-    @staticmethod
-    def _vis_grasp(cloud, position, rotation):
-        import open3d as o3d
-        from graspnetAPI.grasp import GraspGroup
-        o3d_cloud = o3d.geometry.PointCloud()
-        cloud = copy.deepcopy(cloud)
-        o3d_cloud.points = o3d.utility.Vector3dVector(cloud[:, :, :3].reshape(-1, 3).astype(np.float32))
-        o3d_cloud.colors = o3d.utility.Vector3dVector(cloud[:, :, 3:].reshape(-1, 3).astype(np.float32) / 255.)
-        gg = GraspGroup(
-            np.array([1., 0.06, 0.01, 0.06, *Rotation.from_quat(rotation).as_matrix().flatten(), *position,
-                      0]).reshape(1, -1))
-        coordinate_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.5, origin=[0, 0, 0])
-        o3d.visualization.draw_geometries([o3d_cloud, *gg.to_open3d_geometry_list(), coordinate_frame])
+    def class_to_label(self, x):
+        """
+        For a given label value, return corresponding string label.
+        :param x: numeric label
+        :return: corresponding string label
+        """
+        return self.classes[int(x)]
+
     
-    def grasp(self):
-        with self.image_lock, self.result_lock:
-            _depth = copy.deepcopy(self._depth)
-            _image = copy.deepcopy(self._image)
-            _bbox = copy.deepcopy(self._bbox)
-            _mask = copy.deepcopy(self._mask)
+    def plot_boxes(self, results, frame):
+        """
+        Takes a frame and its results as input, and plots the bounding boxes and label on to the frame.
+        :param results: contains labels and coordinates predicted by model on the given frame.
+        :param frame: Frame which has been scored.
+        :return: Frame with bounding boxes and labels ploted on it.
+        """
+        labels, cord = results
+        n = len(labels)
+        x_shape, y_shape = frame.shape[1], frame.shape[0]
+        for i in range(n):
+            row = cord[i]
+            if row[4] >= 0.2:
+                x1, y1, x2, y2 = int(row[0]*x_shape), int(row[1]*y_shape), int(row[2]*x_shape), int(row[3]*y_shape)
+                bgr = (0, 255, 0)
+                cv2.rectangle(frame, (x1, y1), (x2, y2), bgr, 2)
+                cv2.putText(frame, self.class_to_label(labels[i]), (x1, y1), cv2.FONT_HERSHEY_SIMPLEX, 0.9, bgr, 2)
+                print(labels[i], self.class_to_label(labels[i]))
 
-        cloud = self.base_cloud(_image, _depth, self.camera.INTRINSIC, self.CAMERA_SHIFT)
+        return frame
+    
+    def detect(self):
+        time.sleep(5)
+        # rgb = self.camera.get_rgb()
+        # depth = self.camera.get_depth()
+        
+        frame = self.camera.get_rgb()
+        results = self.score_frame(frame)
+        print(results)
+        print("Result get")
+        frame_box = self.plot_boxes(results, frame)
+        
+        labels, cord = results
+        for i in range(len(labels)):
+            if labels[i] == 60:
+                continue
+            else:
+                row = cord[i]
+                x_shape, y_shape = frame.shape[1], frame.shape[0]
+                x1, y1, x2, y2 = int(row[0]*x_shape), int(row[1]*y_shape), int(row[2]*x_shape), int(row[3]*y_shape)
+                x = (x1+x2) / 2
+                y = (y1+y2) / 2
+                print(x, y)
+                return x, y
+        
+        return -1, -1
 
-        grasp_position = cloud[ _bbox[0], _bbox[1] - _bbox[3] // 2 + 8][:3]
-        grasp_position[2] = -0.168
-        grasp_rotation = Rotation.from_euler('xyz', [0, np.pi / 2, 0], degrees=False).as_quat()
+    def tf_cal(self):
+        # Wait for the transform to be available
+        try:
+            trans = self.tfBuffer.lookup_transform('base_link', 'head_camera_rgb_optical_frame', rospy.Time.now(), rospy.Duration(1.0))
+            return trans
+            # trans.transform contains the transformation matrix
+        except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException):
+            rospy.logerr("Transform not available")
 
-        self.arm.move_end_to_pose(grasp_position, grasp_rotation)
+        
+if __name__ == "__main__":
+    rospy.init_node("grasp")
+    detector = Detector()
+    
+    # point = Point()
+    # point.x = -0.6
+    # point.y = 0
+    # point.z = 0
+    # detector.head_pub.publish(point)
+    # time.sleep(2)
+       
+    cmd_msg = Bool()
+    cmd_msg.data = False
+    detector.gripper_pub.publish(cmd_msg)
+    
+    x, y = -1, -1
+    
+    while x == -1 and y == -1:
+        x, y = detector.detect()
+    
+    print("x, y,", x, y)
+    
+    info = detector.camera.get_camera_info()
+    k = np.array(info.K).reshape(3, 3)
+    fx = k[0][0]
+    cx = k[0][2]
+    fy = k[1][1]
+    cy = k[1][2]
+    print(k)
+    depth = detector.camera.get_depth()
+    d = np.array(depth)[int(y)][int(x)]
+    pos_x = (x - cx) * d / fx
+    pos_y = (y - cy) * d / fy
+    pos_z = d
+    
+    print(pos_x, pos_y, pos_z)
+    pos = [pos_x, pos_y, pos_z, 1]
+    
+    trans = detector.tf_cal().transform
+    print(trans.translation, trans.rotation)
+    translation = [trans.translation.x, trans.translation.y, trans.translation.z]
+    
+    rotation = R.from_quat([trans.rotation.x, trans.rotation.y, trans.rotation.z, trans.rotation.w]).as_matrix()
+    
+    transformation_matrix = np.eye(4)
+    transformation_matrix[:3, :3] = rotation
+    transformation_matrix[:3, 3] = translation
+    
+    print(transformation_matrix)
+    
+    transformed_position = (transformation_matrix @ pos)[:3]
+    print(transformed_position)
+    
+    pose = PoseStamped()
+    pose.pose.position.x = transformed_position[0] - 0.1
+    pose.pose.position.y = transformed_position[1]
+    pose.pose.position.z = transformed_position[2] + 0.1
+    pose.pose.orientation.x = 0
+    pose.pose.orientation.y = 0
+    pose.pose.orientation.z = 0
+    pose.pose.orientation.w = 1
+    
+    detector.arm_pub.publish(pose)
+    
+    time.sleep(5)
+    
+    pose.pose.position.x += 0.15
+    detector.arm_pub.publish(pose)
+    
+    print(pose)
+    
+    time.sleep(5)
+    
+    """
+    Args:
+        cmd (int): Enter 1 to open the gripper, -1 to close the gripper
+    """
+    cmd_msg = Bool()
+    cmd_msg.data = True
+    detector.gripper_pub.publish(cmd_msg)
+    
+    time.sleep(3)
+    
+    joint = JointState()
+    joint.position = [1.32, 0.7, 0.0, -2.0, 0.0, -0.57, 0.0]
+
+    detector.joint_pub.publish(joint)
+    
+    print(joint.position)
+    

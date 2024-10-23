@@ -10,6 +10,7 @@ from moveit_python import MoveGroupInterface, PlanningSceneInterface
 from geometry_msgs.msg import PoseStamped, Pose, Point, Quaternion
 from control_msgs.msg import GripperCommandActionGoal, FollowJointTrajectoryAction, FollowJointTrajectoryGoal
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+from sensor_msgs.msg import JointState
 import tf
 import tf.transformations
 import time
@@ -22,10 +23,6 @@ class SimpleGraspInterface:
     def __init__(self, node_name: str, use_ik=True):
         self.node_name = node_name
         rospy.init_node(self.node_name)
-        
-        # Create a buffer and listener
-        self.tfBuffer = tf2_ros.Buffer()
-        self.listener = tf2_ros.TransformListener(self.tfBuffer)
         
         rospy.loginfo("Waiting for head_controller...")
         self.head_client = actionlib.SimpleActionClient("head_controller/follow_joint_trajectory", FollowJointTrajectoryAction)
@@ -120,6 +117,12 @@ class SimpleGraspInterface:
             "/fetch/camera_orientation", Point, self.head_callback, queue_size=self.sub_queue_size
         )
         
+        self.joint_pos = np.zeros(7)
+        self.joint_sub = rospy.Subscriber("/fetch/joint_cmd", JointState, self.joint_callback, queue_size=self.sub_queue_size)
+        
+        self.gripper_close = False
+        self.gripper_cmd = rospy.Subscriber("/fetch/gripper_cmd", Bool, self.gripper_callback, queue_size=self.sub_queue_size)
+        
     def _get_joint_states_by_names(self, joint_names:tuple,all_joint_names:tuple,all_joint_values:tuple) -> list:
         joint_states = [0 for _ in range(len(joint_names))]
         for i, name in enumerate(joint_names):
@@ -191,15 +194,36 @@ class SimpleGraspInterface:
         self.ik_target = cmd_msg
         self.ik_event.set()
     
-    def gripper_control(self, cmd:int):
+    def joint_callback(self, cmd_msg:JointState):
+        self.joint_pos = cmd_msg.position
+        
+        trajectory = JointTrajectory()
+        trajectory.joint_names = self.arm_joint_names
+        trajectory.points.append(JointTrajectoryPoint())
+        trajectory.points[0].positions = self.joint_pos
+        trajectory.points[0].velocities =  [0.0] * len(self.joint_pos)
+        trajectory.points[0].accelerations = [0.0] * len(self.joint_pos)
+        trajectory.points[0].time_from_start = rospy.Duration(4.0)
+        
+        arm_goal = FollowJointTrajectoryGoal()
+        arm_goal.trajectory = trajectory
+        arm_goal.goal_time_tolerance = rospy.Duration(0.0)
+        
+        self.arm_client.send_goal(arm_goal)
+    
+    def gripper_callback(self, cmd_msg:Bool):
         """
         Args:
             cmd (int): Enter 1 to open the gripper, -1 to close the gripper
         """
-        cmd_msg = GripperCommandActionGoal
-        cmd_msg.goal.command.max_effort = 10.0
-        cmd_msg.goal.command.position = 0.1 * cmd
-        self.gripper_pub.publish(cmd_msg)
+        self.gripper_close = cmd_msg.data
+        new_msg = GripperCommandActionGoal()
+        new_msg.goal.command.max_effort = 100.0
+        if self.gripper_close:
+            new_msg.goal.command.position = -0.1
+        else: 
+            new_msg.goal.command.position = 0.1
+        self.gripper_pub.publish(new_msg)
     
     def head_callback(self, cmd_msg:Point):
         x, y, z = cmd_msg.x, cmd_msg.y, cmd_msg.z
@@ -220,15 +244,6 @@ class SimpleGraspInterface:
     def reset_callback(self, cmd_msg:Bool):
         if cmd_msg.data:
             pass
-    
-    def tf_cal(self):
-        # Wait for the transform to be available
-        try:
-            trans = self.tfBuffer.lookup_transform('base_link', 'head_camera_link', rospy.Time.now(), rospy.Duration(1.0))
-            print(trans)
-            # trans.transform contains the transformation matrix
-        except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException):
-            rospy.logerr("Transform not available")
     
     def run(self):
         """
@@ -255,10 +270,8 @@ class SimpleGraspInterface:
         #         self.arm_movement(self.target_pose)
         #     print(step)
         #     continue
-        # rospy.spin()
-        while not rospy.is_shutdown():
-            self.tf_cal()
-    
+        rospy.spin()
+            
 
 def main():
     # parser = argparse.ArgumentParser()
