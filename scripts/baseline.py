@@ -48,7 +48,7 @@ class Camera():
     def get_camera_info(self):
         return self.camera_info
 
-class Detector:
+class Solver:
     def __init__(self):
         self.camera = Camera()
         self.model = self.load_model()
@@ -72,7 +72,7 @@ class Detector:
         Loads Yolo5 model from pytorch hub.
         :return: Trained Pytorch model.
         """
-        model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=True)
+        model = torch.hub.load('ultralytics/yolov5', 'yolov5l', pretrained=True)
         return model
 
     def score_frame(self, frame):
@@ -156,34 +156,34 @@ class Detector:
         
 if __name__ == "__main__":
     rospy.init_node("grasp")
-    detector = Detector()
+    solver = Solver()
     
     # point = Point()
     # point.x = -0.6
     # point.y = 0
     # point.z = 0
-    # detector.head_pub.publish(point)
+    # solver.head_pub.publish(point)
     # time.sleep(2)
        
     cmd_msg = Bool()
     cmd_msg.data = False
-    detector.gripper_pub.publish(cmd_msg)
+    solver.gripper_pub.publish(cmd_msg)
     
     x, y = -1, -1
     
     while x == -1 and y == -1:
-        x, y = detector.detect()
+        x, y = solver.detect()
     
     print("x, y,", x, y)
     
-    info = detector.camera.get_camera_info()
+    info = solver.camera.get_camera_info()
     k = np.array(info.K).reshape(3, 3)
     fx = k[0][0]
     cx = k[0][2]
     fy = k[1][1]
     cy = k[1][2]
     print(k)
-    depth = detector.camera.get_depth()
+    depth = solver.camera.get_depth()
     d = np.array(depth)[int(y)][int(x)]
     pos_x = (x - cx) * d / fx
     pos_y = (y - cy) * d / fy
@@ -192,7 +192,7 @@ if __name__ == "__main__":
     print(pos_x, pos_y, pos_z)
     pos = [pos_x, pos_y, pos_z, 1]
     
-    trans = detector.tf_cal().transform
+    trans = solver.tf_cal().transform
     print(trans.translation, trans.rotation)
     translation = [trans.translation.x, trans.translation.y, trans.translation.z]
     
@@ -216,12 +216,12 @@ if __name__ == "__main__":
     pose.pose.orientation.z = 0
     pose.pose.orientation.w = 1
     
-    detector.arm_pub.publish(pose)
+    solver.arm_pub.publish(pose)
     
     time.sleep(5)
     
     pose.pose.position.x += 0.15
-    detector.arm_pub.publish(pose)
+    solver.arm_pub.publish(pose)
     
     print(pose)
     
@@ -233,14 +233,14 @@ if __name__ == "__main__":
     """
     cmd_msg = Bool()
     cmd_msg.data = True
-    detector.gripper_pub.publish(cmd_msg)
+    solver.gripper_pub.publish(cmd_msg)
     
     time.sleep(3)
     
     joint = JointState()
     joint.position = [1.32, 0.7, 0.0, -2.0, 0.0, -0.57, 0.0]
 
-    detector.joint_pub.publish(joint)
+    solver.joint_pub.publish(joint)
     
     print(joint.position)
     
