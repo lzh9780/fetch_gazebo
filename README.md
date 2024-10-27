@@ -28,7 +28,7 @@ If the ik is not disabled:
 
 ## 5. Camera pose change
 ```
-rostopic pub -1 /fetch/camera_orientation geometry_msgs/Point "x: 0.0
+rostopic pub -1 /fetch/camera_orientation geometry_msgs/Point "x: -0.6
 y: 0.0
 z: 0.0"
 ```
