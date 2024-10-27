@@ -5,6 +5,12 @@ Based on https://github.com/ZebraDevs/fetch_gazebo/tree/gazebo11
 ## 1. Requests
 `sudo apt-get install ros-noetic-fetch-moveit-config`
 
+python
+
+pytorch
+
+opencv
+
 ## 2. Start Gazebo
 `roscore` Optional, Recommanded
 
@@ -20,7 +26,20 @@ If the ik is not disabled:
 ## 4. Start control scripts
 `rosrun fetch_gazebo interface.py`
 
-## 5. Control topics
+## 5. Camera pose change
+```
+rostopic pub -1 /fetch/camera_orientation geometry_msgs/Point "x: 0.0
+y: 0.0
+z: 0.0"
+```
+
+## 6. Start detection and grasp
+```
+cd /PATS/TO/WS/src/fetch_gazebo/scripts/
+python baseline.py
+```
+
+## 7. Control topics
 ### Camera (head) controllor:
 ```
 rostopic pub -1 /fetch/camera_orientation geometry_msgs/Point "x: 0.0

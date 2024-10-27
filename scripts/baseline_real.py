@@ -131,7 +131,7 @@ class Solver:
         
         labels, cord = results
         for i in range(len(labels)):
-            if labels[i] == 60:
+            if labels[i] != 39:
                 continue
             else:
                 row = cord[i]
@@ -139,6 +139,7 @@ class Solver:
                 x1, y1, x2, y2 = int(row[0]*x_shape), int(row[1]*y_shape), int(row[2]*x_shape), int(row[3]*y_shape)
                 x = (x1+x2) / 2
                 y = (y1+y2) / 2
+                print("picked: ", labels[i], self.class_to_label(labels[i]))
                 print(x, y)
                 return x, y
         
